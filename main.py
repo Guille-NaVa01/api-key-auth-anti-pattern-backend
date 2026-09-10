@@ -49,8 +49,9 @@ app.add_middleware(
 # decompiled mobile app, etc.) can authenticate as any other client,
 # forever, until the key is manually rotated.
 # --------------------------------------------------------------------------
-API_KEY = os.environ.get("API_KEY", "supersecret-demo-key-123")
-
+API_KEY = os.environ.get("API_KEY")
+if not API_KEY:
+    raise RuntimeError("API_KEY environment variable is not set. Copy .env.example to .env and set a value.")
 
 def verify_api_key(x_api_key: str | None) -> None:
     """Naive header check: presence + exact string match. No hashing,
