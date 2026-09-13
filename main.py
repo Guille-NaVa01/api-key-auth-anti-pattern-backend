@@ -13,6 +13,7 @@ server-side, per-client keys, rate limiting, HTTPS-only, etc.)
 
 Step 2 addition: Fernet encrypt/decrypt for data stored in SQLite.
 Step 3 addition: DATABASE_ENCRYPTION_KEY read from env var (never hardcoded).
+Step 4 addition: LDAP authentication via /api/login (BIND against OpenLDAP).
 """
 
 import os
@@ -26,6 +27,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
+
+from ldap3 import Server, Connection, ALL
 
 try:
     from dotenv import load_dotenv
@@ -99,6 +102,14 @@ _cipher = Fernet(DATABASE_ENCRYPTION_KEY.encode())
 
 
 # --------------------------------------------------------------------------
+# LDAP CONFIGURATION
+# --------------------------------------------------------------------------
+LDAP_HOST = os.environ.get("LDAP_HOST", "localhost")
+LDAP_PORT = int(os.environ.get("LDAP_PORT", "389"))
+LDAP_BASE_DN = os.environ.get("LDAP_BASE_DN", "dc=example,dc=com")
+
+
+# --------------------------------------------------------------------------
 # DATABASE SETUP (SQLite — no extra infrastructure required)
 # --------------------------------------------------------------------------
 DATABASE_URL = "sqlite:///./messages.db"
@@ -131,6 +142,11 @@ class DataPayload(BaseModel):
 class RotateKeyRequest(BaseModel):
     new_key:         str
     rotation_secret: str  # Must equal DATABASE_ENCRYPTION_KEY to authenticate
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class SendMessageRequest(BaseModel):
@@ -169,6 +185,50 @@ def internal_rotate_key(payload: RotateKeyRequest):
     _api_key_store["current"] = payload.new_key
     print(f"[rotate] API_KEY updated: {old_key[:8]}... -> {payload.new_key[:8]}...")
     return {"rotated": True, "hint": f"new key starts with {payload.new_key[:4]}..."}
+
+
+# --------------------------------------------------------------------------
+# LDAP LOGIN ENDPOINT
+# --------------------------------------------------------------------------
+@app.post("/api/login")
+def login(
+    payload: LoginRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    """Authenticates a user against the OpenLDAP directory.
+
+    Protected by the same rotating API key as all other /api/* endpoints
+    (Nginx injects the header automatically).
+
+    Performs a simple BIND with the user's credentials. On success,
+    returns the username and full DN. On failure, returns 401.
+    """
+    verify_api_key(x_api_key)
+
+    server = Server(LDAP_HOST, port=LDAP_PORT, get_info=ALL)
+    user_dn = f"uid={payload.username},ou=users,{LDAP_BASE_DN}"
+
+    connection = Connection(
+        server,
+        user=user_dn,
+        password=payload.password,
+        auto_bind=False,
+    )
+
+    try:
+        if connection.bind():
+            return {
+                "authenticated": True,
+                "username": payload.username,
+                "dn": user_dn,
+            }
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        )
+    finally:
+        connection.unbind()
 
 
 # --------------------------------------------------------------------------
